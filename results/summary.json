@@ -1,5 +1,62 @@
 {
-  "files_analyzed": 2,
-  "functions_found": 6,
-  "output_csv": "C:\\Users\\nlope\\Desktop\\HC1 WEEK1\\bug_prone_project\\data\\pilot_metrics.csv"
+  "file": "sample_student_code.py",
+  "function_count": 4,
+  "functions": [
+    {
+      "file": "sample_student_code.py",
+      "function": "find_max",
+      "start_line": 9,
+      "end_line": "",
+      "nloc": "",
+      "ccn": 4,
+      "token": "",
+      "params": "",
+      "length": "",
+      "radon_grade": "A",
+      "radon_cc": 4,
+      "bug_label": ""
+    },
+    {
+      "file": "sample_student_code.py",
+      "function": "process_scores",
+      "start_line": 18,
+      "end_line": "",
+      "nloc": "",
+      "ccn": 4,
+      "token": "",
+      "params": "",
+      "length": "",
+      "radon_grade": "A",
+      "radon_cc": 4,
+      "bug_label": ""
+    },
+    {
+      "file": "sample_student_code.py",
+      "function": "divide_numbers",
+      "start_line": 4,
+      "end_line": "",
+      "nloc": "",
+      "ccn": 2,
+      "token": "",
+      "params": "",
+      "length": "",
+      "radon_grade": "A",
+      "radon_cc": 2,
+      "bug_label": ""
+    },
+    {
+      "file": "sample_student_code.py",
+      "function": "add_numbers",
+      "start_line": 1,
+      "end_line": "",
+      "nloc": "",
+      "ccn": 1,
+      "token": "",
+      "params": "",
+      "length": "",
+      "radon_grade": "A",
+      "radon_cc": 1,
+      "bug_label": ""
+    }
+  ]
 }

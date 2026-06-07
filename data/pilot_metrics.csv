@@ -1,7 +1,5 @@
 file,function,start_line,end_line,nloc,ccn,token,params,length,radon_grade,radon_cc,bug_label
-C:\Users\nlope\Desktop\HC1 WEEK1\bug_prone_project\sample_code\student_sample.py,calculate_average,1,7,7,3,29,1,7,A,3,
-C:\Users\nlope\Desktop\HC1 WEEK1\bug_prone_project\sample_code\student_sample.py,find_duplicate_names,10,18,9,3,40,1,9,A,3,
-C:\Users\nlope\Desktop\HC1 WEEK1\bug_prone_project\sample_code\student_sample.py,process_user_records,21,35,15,7,76,1,15,B,7,
-C:\Users\nlope\Desktop\HC1 WEEK1\bug_prone_project\sample_code\student_sample.py,risky_division,38,50,13,5,75,2,13,A,5,
-C:\Users\nlope\Desktop\HC1 WEEK1\bug_prone_project\sample_code\student_sample2.py,login_attempt,1,6,6,3,28,3,6,A,3,
-C:\Users\nlope\Desktop\HC1 WEEK1\bug_prone_project\sample_code\student_sample2.py,recommendation_score,9,20,12,5,53,1,12,A,5,
+sample_student_code.py,find_max,9,,,4,,,,A,4,
+sample_student_code.py,process_scores,18,,,4,,,,A,4,
+sample_student_code.py,divide_numbers,4,,,2,,,,A,2,
+sample_student_code.py,add_numbers,1,,,1,,,,A,1,
