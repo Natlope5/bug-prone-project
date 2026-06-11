@@ -1,3 +1,7 @@
 .vs/
 *.user
 *.suo
+bug_prone_project/
+scripts/data/
+scripts/results/
+py
