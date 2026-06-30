@@ -1,7 +1,14 @@
+# Visual Studio artifacts
 .vs/
 *.user
 *.suo
-bug_prone_project/
-scripts/data/
-scripts/results/
-py
+
+# Python caches and temp files
+__pycache__/
+*.pyc
+
+# Word temporary lock files
+docs/~$*.docx
+
+# Standalone model pickle (you already track models in results/bug_model/)
+results/bug_model.pkl
