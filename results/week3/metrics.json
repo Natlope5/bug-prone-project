@@ -1,15 +1,30 @@
 {
-  "precision": 0.0,
-  "recall": 0.0,
-  "f1": 0.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
   "roc_auc": 1.0,
-  "n_rows_used": 10,
-  "train_size": 7,
-  "test_size": 3,
+  "n_rows_used": 23890,
+  "train_size": 16723,
+  "test_size": 7167,
   "features": [
+    "start_line",
+    "end_line",
     "nloc",
     "ccn",
-    "params"
+    "token",
+    "params",
+    "length",
+    "radon_cc"
   ],
+  "feature_importance": {
+    "nloc": 0.4343396191915122,
+    "token": 0.23294709506314842,
+    "length": 0.12995404309855554,
+    "params": 0.06249955219674695,
+    "ccn": 0.06082976916815099,
+    "radon_cc": 0.049868741863843706,
+    "start_line": 0.014943889146947695,
+    "end_line": 0.01461729027109449
+  },
   "model": "RandomForestClassifier"
 }
