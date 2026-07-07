@@ -1,15 +1,48 @@
-\import csv
+import csv
 import json
+import re
+import subprocess
 import sys
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
-import lizard
-
-# Extract function-level metrics from source files and save them for later modeling.
 ROOT = Path(__file__).resolve().parents[1]
 
-OUT_CSV = ROOT / "data" / "pilot_metrics.csv"
-OUT_JSON = ROOT / "results" / "summary.json"
+REPOS_DIR = ROOT / "data" / "repos"
+OUT_CSV = ROOT / "data" / "repo_history_metrics.csv"
+OUT_JSON = ROOT / "results" / "repo_history_summary.json"
+
+BUGFIX_PATTERN = re.compile(
+    r"\b("
+    r"fix|fixed|fixes|bug|bugs|bugfix|defect|defects|error|errors|issue|issues|"
+    r"resolve|resolved|resolves|patch|patched|hotfix|repair|repaired|correct|corrected"
+    r")\b",
+    re.IGNORECASE,
+)
+
+FIELDNAMES = [
+    "repo_name",
+    "file_id",
+    "commit_count",
+    "churn_added",
+    "churn_deleted",
+    "total_churn",
+    "file_age_days",
+    "days_since_last_change",
+    "recent_7d_commits",
+    "recent_30d_commits",
+    "late_night_commits",
+    "late_night_ratio",
+    "weekend_commits",
+    "weekend_ratio",
+    "active_days",
+    "avg_commits_per_active_day",
+    "max_commits_one_day",
+    "burstiness_score",
+    "bug_fix_commits",
+    "bug_label",
+]
 
 ALLOWED_EXTENSIONS = {
     ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp",
@@ -18,61 +51,255 @@ ALLOWED_EXTENSIONS = {
 
 
 def ensure_output_dirs():
-    """Create output folders if they do not exist yet."""
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 
 
-def detect_language(path: Path):
-    """Map a file extension to a language label."""
-    ext = path.suffix.lower()
-    mapping = {
-        ".py": "Python",
-        ".js": "JavaScript",
-        ".ts": "TypeScript",
-        ".java": "Java",
-        ".c": "C",
-        ".cpp": "C++",
-        ".h": "C/C++ Header",
-        ".hpp": "C++ Header",
-        ".cs": "C#",
-        ".go": "Go",
-        ".php": "PHP",
-        ".rb": "Ruby",
-        ".swift": "Swift",
-        ".kt": "Kotlin",
-        ".m": "Objective-C",
-        ".mm": "Objective-C++",
-    }
-    return mapping.get(ext, "Unknown")
+def normalize_rel_path(path_str: str):
+    return Path(path_str).as_posix()
 
 
-def is_test_file(path: Path):
-    """Flag likely test files based on common naming patterns."""
-    lowered = str(path).lower()
-    return int(
-        "test" in path.name.lower()
-        or "tests" in lowered
-        or "__tests__" in lowered
-        or "spec" in path.name.lower()
-    )
+def build_file_id(repo_name: str, repo_relative_path: str):
+    return normalize_rel_path(f"data/repos/{repo_name}/{repo_relative_path}")
 
 
-def safe_int(value, default=0):
-    """Convert a value to int without crashing on blanks or bad data."""
+def safe_int_numstat(value: str):
+    value = (value or "").strip()
+    if value in {"", "-"}:
+        return 0
     try:
-        if value == "" or value is None:
-            return default
         return int(value)
     except Exception:
-        return default
+        return 0
 
 
-def collect_code_files(targets):
-    """Collect supported code files from one or more files or folders."""
-    code_files = []
+def allowed_code_path(repo_relative_path: str):
+    return Path(repo_relative_path).suffix.lower() in ALLOWED_EXTENSIONS
 
-    for raw_target in targets:
+
+def run_git_log(repo_path: Path):
+    cmd = [
+        "git",
+        "-C",
+        str(repo_path),
+        "log",
+        "--numstat",
+        "--date=iso-strict",
+        "--no-merges",
+        '--pretty=format:__COMMIT__|%H|%ad|%s',
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"git log failed for {repo_path}")
+    return result.stdout.splitlines()
+
+
+def iter_repo_commits(repo_path: Path):
+    lines = run_git_log(repo_path)
+    current = None
+
+    for line in lines:
+        if line.startswith("__COMMIT__|"):
+            if current is not None:
+                yield current
+
+            parts = line.split("|", 3)
+            if len(parts) < 4:
+                current = None
+                continue
+
+            _, commit_hash, date_str, subject = parts
+            current = {
+                "hash": commit_hash,
+                "date_str": date_str,
+                "subject": subject,
+                "files": [],
+            }
+            continue
+
+        if current is None:
+            continue
+
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+
+        added, deleted, file_path = parts
+        file_path = normalize_rel_path(file_path)
+
+        if not file_path or not allowed_code_path(file_path):
+            continue
+
+        current["files"].append({
+            "added": safe_int_numstat(added),
+            "deleted": safe_int_numstat(deleted),
+            "file_path": file_path,
+        })
+
+    if current is not None:
+        yield current
+
+
+def parse_commit_dt(date_str: str):
+    return datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def collect_repo_history(repo_path: Path):
+    repo_name = repo_path.name
+    now = datetime.now(timezone.utc)
+
+    file_stats = defaultdict(lambda: {
+        "repo_name": repo_name,
+        "commit_count": 0,
+        "churn_added": 0,
+        "churn_deleted": 0,
+        "recent_7d_commits": 0,
+        "recent_30d_commits": 0,
+        "late_night_commits": 0,
+        "weekend_commits": 0,
+        "bug_fix_commits": 0,
+        "first_seen": None,
+        "last_seen": None,
+        "active_days_set": set(),
+        "commits_per_day": defaultdict(int),
+    })
+
+    commit_counter = 0
+    commit_file_counter = 0
+
+    for commit in iter_repo_commits(repo_path):
+        commit_counter += 1
+
+        try:
+            dt = parse_commit_dt(commit["date_str"])
+        except Exception:
+            continue
+
+        days_ago = (now - dt).total_seconds() / 86400.0
+        is_recent_7d = days_ago <= 7
+        is_recent_30d = days_ago <= 30
+        is_late_night = dt.hour < 6
+        is_weekend = dt.weekday() >= 5
+        is_bugfix = bool(BUGFIX_PATTERN.search(commit["subject"] or ""))
+
+        for changed in commit["files"]:
+            repo_relative_path = changed["file_path"]
+            if not repo_relative_path:
+                continue
+
+            commit_file_counter += 1
+            file_id = build_file_id(repo_name, repo_relative_path)
+            stat = file_stats[file_id]
+
+            stat["commit_count"] += 1
+            stat["churn_added"] += changed["added"]
+            stat["churn_deleted"] += changed["deleted"]
+
+            if is_recent_7d:
+                stat["recent_7d_commits"] += 1
+            if is_recent_30d:
+                stat["recent_30d_commits"] += 1
+            if is_late_night:
+                stat["late_night_commits"] += 1
+            if is_weekend:
+                stat["weekend_commits"] += 1
+            if is_bugfix:
+                stat["bug_fix_commits"] += 1
+
+            day_key = dt.date().isoformat()
+            stat["active_days_set"].add(day_key)
+            stat["commits_per_day"][day_key] += 1
+
+            if stat["first_seen"] is None or dt < stat["first_seen"]:
+                stat["first_seen"] = dt
+            if stat["last_seen"] is None or dt > stat["last_seen"]:
+                stat["last_seen"] = dt
+
+    rows = []
+    for file_id, stat in file_stats.items():
+        commit_count = stat["commit_count"]
+        churn_added = stat["churn_added"]
+        churn_deleted = stat["churn_deleted"]
+        total_churn = churn_added + churn_deleted
+        active_days = len(stat["active_days_set"])
+        avg_commits_per_active_day = commit_count / active_days if active_days else 0.0
+        max_commits_one_day = max(stat["commits_per_day"].values()) if stat["commits_per_day"] else 0
+        burstiness_score = (
+            max_commits_one_day / avg_commits_per_active_day
+            if avg_commits_per_active_day > 0
+            else 0.0
+        )
+
+        first_seen = stat["first_seen"]
+        last_seen = stat["last_seen"]
+
+        file_age_days = int((now - first_seen).total_seconds() / 86400.0) if first_seen else 0
+        days_since_last_change = int((now - last_seen).total_seconds() / 86400.0) if last_seen else 0
+
+        late_night_ratio = stat["late_night_commits"] / commit_count if commit_count else 0.0
+        weekend_ratio = stat["weekend_commits"] / commit_count if commit_count else 0.0
+
+        bug_fix_commits = stat["bug_fix_commits"]
+        bug_label = 1 if bug_fix_commits > 0 else 0
+
+        rows.append({
+            "repo_name": stat["repo_name"],
+            "file_id": file_id,
+            "commit_count": commit_count,
+            "churn_added": churn_added,
+            "churn_deleted": churn_deleted,
+            "total_churn": total_churn,
+            "file_age_days": file_age_days,
+            "days_since_last_change": days_since_last_change,
+            "recent_7d_commits": stat["recent_7d_commits"],
+            "recent_30d_commits": stat["recent_30d_commits"],
+            "late_night_commits": stat["late_night_commits"],
+            "late_night_ratio": round(late_night_ratio, 6),
+            "weekend_commits": stat["weekend_commits"],
+            "weekend_ratio": round(weekend_ratio, 6),
+            "active_days": active_days,
+            "avg_commits_per_active_day": round(avg_commits_per_active_day, 6),
+            "max_commits_one_day": max_commits_one_day,
+            "burstiness_score": round(burstiness_score, 6),
+            "bug_fix_commits": bug_fix_commits,
+            "bug_label": bug_label,
+        })
+
+    summary = {
+        "repo_name": repo_name,
+        "commits_processed": commit_counter,
+        "commit_file_events": commit_file_counter,
+        "files_with_history": len(rows),
+    }
+
+    return rows, summary
+
+
+def write_csv(rows):
+    with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_json(summary):
+    with OUT_JSON.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+
+def collect_target_repos(input_targets):
+    repos = []
+
+    for raw_target in input_targets:
         target = Path(raw_target)
 
         if not target.is_absolute():
@@ -82,208 +309,66 @@ def collect_code_files(targets):
             print(f"Warning: target not found and will be skipped: {raw_target}")
             continue
 
-        if target.is_file():
-            if target.suffix.lower() in ALLOWED_EXTENSIONS:
-                code_files.append(target)
-            else:
-                print(f"Warning: unsupported file skipped: {target}")
-        elif target.is_dir():
-            for path in target.rglob("*"):
-                if path.is_file() and path.suffix.lower() in ALLOWED_EXTENSIONS:
-                    code_files.append(path)
+        if (target / ".git").exists():
+            repos.append(target)
+            continue
 
-    return sorted(set(code_files))
+        if target.is_dir():
+            for child in target.iterdir():
+                if child.is_dir() and (child / ".git").exists():
+                    repos.append(child)
 
-
-def build_repo_name(relative_name: str):
-    """Extract the repo folder name from a relative path."""
-    parts = Path(relative_name).parts
-
-    if "repos" in parts:
-        repos_index = parts.index("repos")
-        if repos_index + 1 < len(parts):
-            return parts[repos_index + 1]
-
-    if parts:
-        return parts[0]
-
-    return ""
-
-
-def extract_lizard_metrics(file_path, target_name):
-    """Run lizard on a file and return one row per detected function."""
-    rows = []
-
-    try:
-        result = lizard.analyze_file(str(file_path))
-    except Exception as e:
-        print(f"Warning: failed to analyze {file_path}: {e}")
-        return rows
-
-    repo_name = build_repo_name(target_name)
-    language = detect_language(file_path)
-    extension = file_path.suffix.lower()
-    file_name = file_path.name
-    test_flag = is_test_file(file_path)
-
-    for func in result.function_list:
-        try:
-            params = len(func.parameters)
-        except Exception:
-            params = 0
-
-        function_name = getattr(func, "name", "") or "anonymous closure"
-        start_line = getattr(func, "start_line", "")
-        end_line = getattr(func, "end_line", "")
-        nloc = getattr(func, "nloc", "")
-        ccn = getattr(func, "cyclomatic_complexity", "")
-        token = getattr(func, "token_count", 0)
-        length = getattr(func, "length", nloc)
-
-        start_line_int = safe_int(start_line, 0)
-        end_line_int = safe_int(end_line, 0)
-        line_span = end_line_int - start_line_int + 1 if start_line_int and end_line_int else ""
-
-        function_id = f"{target_name}:{function_name}:{start_line}"
-
-        ccn_val = safe_int(ccn, 0)
-        nloc_val = safe_int(nloc, 0)
-        params_val = safe_int(params, 0)
-
-        # Simple heuristic label used for the pilot dataset.
-        bug_label = 1 if (
-            ccn_val >= 10
-            or nloc_val >= 20
-            or params_val >= 5
-        ) else 0
-
-        rows.append({
-            "repo_name": repo_name,
-            "file": target_name,
-            "file_name": file_name,
-            "relative_path": target_name,
-            "extension": extension,
-            "language": language,
-            "is_test_file": test_flag,
-            "function_id": function_id,
-            "function": function_name,
-            "start_line": start_line,
-            "end_line": end_line,
-            "line_span": line_span,
-            "nloc": nloc,
-            "ccn": ccn,
-            "token": token,
-            "params": params,
-            "length": length,
-            "radon_grade": "",
-            "radon_cc": ccn,
-            "bug_label": bug_label,
-        })
-
-    return rows
-
-
-def write_csv(rows):
-    """Write extracted rows to the pilot metrics CSV."""
-    fieldnames = [
-        "repo_name",
-        "file",
-        "file_name",
-        "relative_path",
-        "extension",
-        "language",
-        "is_test_file",
-        "function_id",
-        "function",
-        "start_line",
-        "end_line",
-        "line_span",
-        "nloc",
-        "ccn",
-        "token",
-        "params",
-        "length",
-        "radon_grade",
-        "radon_cc",
-        "bug_label",
-    ]
-
-    with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def write_json(summary):
-    """Write the scan summary to JSON."""
-    with OUT_JSON.open("w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    return sorted(set(repos))
 
 
 def main():
-    """Run the metric extraction script from the command line."""
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print('  py "scripts\\extract_metrics.py" "data\\repos\\angular.js"')
-        print('  py "scripts\\extract_metrics.py" "data\\repos"')
-        print('  py "scripts\\extract_metrics.py" "data\\repos\\repo1" "data\\repos\\repo2"')
-        return
-
     ensure_output_dirs()
 
-    input_targets = sys.argv[1:]
-    code_files = collect_code_files(input_targets)
+    if len(sys.argv) < 2:
+        input_targets = [str(REPOS_DIR)]
+    else:
+        input_targets = sys.argv[1:]
 
-    if not code_files:
-        print("No supported code files were found in the provided input paths.")
+    repos = collect_target_repos(input_targets)
+
+    if not repos:
+        print("No git repositories found in the provided paths.")
         return
 
     all_rows = []
-    analyzed_files = []
-    skipped_files = []
+    repo_summaries = []
+    skipped_repos = []
 
-    print(f"Found {len(code_files)} supported code files to analyze.")
+    print(f"Found {len(repos)} repositories to analyze.")
 
-    for file_path in code_files:
-        print(f"Analyzing file: {file_path}")
-
+    for repo_path in repos:
+        print(f"Analyzing repository history: {repo_path}")
         try:
-            relative_name = str(file_path.relative_to(ROOT))
-        except ValueError:
-            relative_name = str(file_path)
-
-        rows = extract_lizard_metrics(file_path, relative_name)
-
-        if not rows:
-            skipped_files.append(str(file_path))
-            continue
-
-        all_rows.extend(rows)
-        analyzed_files.append({
-            "file": relative_name,
-            "repo_name": build_repo_name(relative_name),
-            "language": detect_language(file_path),
-            "function_count": len(rows),
-        })
+            rows, summary = collect_repo_history(repo_path)
+            all_rows.extend(rows)
+            repo_summaries.append(summary)
+        except Exception as e:
+            print(f"Warning: failed to analyze repo history for {repo_path}: {e}")
+            skipped_repos.append(str(repo_path))
 
     write_csv(all_rows)
 
     summary = {
         "input_targets": input_targets,
-        "files_analyzed": len(analyzed_files),
-        "files_skipped": len(skipped_files),
-        "total_functions": len(all_rows),
-        "analyzed_files": analyzed_files,
-        "skipped_files": skipped_files,
+        "repositories_analyzed": len(repo_summaries),
+        "repositories_skipped": len(skipped_repos),
+        "files_with_history": len(all_rows),
+        "repo_summaries": repo_summaries,
+        "skipped_repos": skipped_repos,
         "output_csv": str(OUT_CSV),
         "output_json": str(OUT_JSON),
     }
 
     write_json(summary)
 
-    print(f"\nFiles successfully analyzed: {len(analyzed_files)}")
-    print(f"Files skipped: {len(skipped_files)}")
-    print(f"Total functions found: {len(all_rows)}")
+    print(f"\nRepositories successfully analyzed: {len(repo_summaries)}")
+    print(f"Repositories skipped: {len(skipped_repos)}")
+    print(f"Files with history rows: {len(all_rows)}")
     print(f"CSV saved to: {OUT_CSV}")
     print(f"JSON saved to: {OUT_JSON}")
 

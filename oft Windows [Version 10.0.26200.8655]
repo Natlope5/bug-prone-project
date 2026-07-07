@@ -1,0 +1,537 @@
+[1mdiff --git a/scripts/train_bug_model.py b/scripts/train_bug_model.py[m
+[1mindex 7ddf80b..36b944a 100644[m
+[1m--- a/scripts/train_bug_model.py[m
+[1m+++ b/scripts/train_bug_model.py[m
+[36m@@ -7,16 +7,19 @@[m [mfrom sklearn.ensemble import RandomForestClassifier[m
+ from sklearn.linear_model import LogisticRegression[m
+ from sklearn.metrics import ([m
+     accuracy_score,[m
+[32m+[m[32m    classification_report,[m
+     confusion_matrix,[m
+     f1_score,[m
+[32m+[m[32m    precision_recall_curve,[m
+     precision_score,[m
+     recall_score,[m
+     roc_auc_score,[m
+     roc_curve,[m
+ )[m
+[31m-from sklearn.model_selection import train_test_split[m
+[32m+[m[32mfrom sklearn.model_selection import GroupShuffleSplit[m
+[32m+[m[32mfrom sklearn.pipeline import make_pipeline[m
+[32m+[m[32mfrom sklearn.preprocessing import StandardScaler[m
+ [m
+[31m-# Train BugBuddy models from static metrics and optional repo-history metrics.[m
+ ROOT = Path(__file__).resolve().parents[1][m
+ [m
+ STATIC_CSV = ROOT / "data" / "pilot_metrics.csv"[m
+[36m@@ -59,13 +62,11 @@[m [mHISTORY_FEATURES = [[m
+ [m
+ [m
+ def ensure_output_dirs():[m
+[31m-    """Create result folders if they do not exist yet."""[m
+     RESULTS_DIR.mkdir(parents=True, exist_ok=True)[m
+     STATIC_MODEL_TOPLEVEL.parent.mkdir(parents=True, exist_ok=True)[m
+ [m
+ [m
+ def load_csv(path: Path):[m
+[31m-    """Load a required CSV file."""[m
+     if not path.exists():[m
+         raise FileNotFoundError(f"Required input file not found: {path}")[m
+     df = pd.read_csv(path)[m
+[36m@@ -74,7 +75,6 @@[m [mdef load_csv(path: Path):[m
+ [m
+ [m
+ def try_load_optional_csv(path: Path):[m
+[31m-    """Load an optional CSV file, or return None if it is missing."""[m
+     if not path.exists():[m
+         print(f"Optional input file not found, skipping it: {path}")[m
+         return None[m
+[36m@@ -84,32 +84,35 @@[m [mdef try_load_optional_csv(path: Path):[m
+ [m
+ [m
+ def merge_datasets(static_df: pd.DataFrame, history_df: pd.DataFrame | None):[m
+[31m-    """Merge static metrics with optional history metrics on function_id."""[m
+     if "function_id" not in static_df.columns:[m
+[31m-        raise RuntimeError([m
+[31m-            "Static metrics CSV is missing function_id. "[m
+[31m-            "Update and rerun extract_metrics.py first."[m
+[31m-        )[m
+[32m+[m[32m        raise RuntimeError("Static metrics CSV is missing function_id.")[m
+[32m+[m[32m    if "file_id" not in static_df.columns:[m
+[32m+[m[32m        raise RuntimeError("Static metrics CSV is missing file_id.")[m
+ [m
+[31m-    if history_df is None:[m
+[31m-        merged_df = static_df.copy()[m
+[31m-        for col in HISTORY_FEATURES:[m
+[31m-            if col not in merged_df.columns:[m
+[31m-                merged_df[col] = 0[m
+[31m-        return merged_df[m
+[32m+[m[32m    merged_df = static_df.copy()[m
+ [m
+[31m-    if "function_id" not in history_df.columns:[m
+[31m-        raise RuntimeError([m
+[31m-            "Repository history CSV is missing function_id. "[m
+[31m-            "Run extract_repo_history.py first."[m
+[32m+[m[32m    if history_df is not None:[m
+[32m+[m[32m        if "file_id" not in history_df.columns:[m
+[32m+[m[32m            raise RuntimeError("Repository history CSV is missing file_id.")[m
+[32m+[m
+[32m+[m[32m        history_keep_cols = ["file_id", "bug_label"] + [[m
+[32m+[m[32m            c for c in HISTORY_FEATURES if c in history_df.columns[m
+[32m+[m[32m        ][m
+[32m+[m
+[32m+[m[32m        merged_df = merged_df.merge([m
+[32m+[m[32m            history_df[history_keep_cols].drop_duplicates(subset=["file_id"]),[m
+[32m+[m[32m            on="file_id",[m
+[32m+[m[32m            how="left",[m
+[32m+[m[32m            suffixes=("", "_history"),[m
+         )[m
+ [m
+[31m-    history_keep_cols = ["function_id"] + [c for c in HISTORY_FEATURES if c in history_df.columns][m
+[31m-    merged_df = static_df.merge([m
+[31m-        history_df[history_keep_cols].drop_duplicates(subset=["function_id"]),[m
+[31m-        on="function_id",[m
+[31m-        how="left",[m
+[31m-    )[m
+[32m+[m[32m        if "bug_label_history" in merged_df.columns and "bug_label" in merged_df.columns:[m
+[32m+[m[32m            merged_df["bug_label"] = pd.to_numeric([m
+[32m+[m[32m                merged_df["bug_label_history"], errors="coerce"[m
+[32m+[m[32m            ).combine_first(pd.to_numeric(merged_df["bug_label"], errors="coerce"))[m
+[32m+[m[32m            merged_df = merged_df.drop(columns=["bug_label_history"])[m
+[32m+[m[32m        elif "bug_label_history" in merged_df.columns:[m
+[32m+[m[32m            merged_df = merged_df.rename(columns={"bug_label_history": "bug_label"})[m
+ [m
+     for col in HISTORY_FEATURES:[m
+         if col not in merged_df.columns:[m
+[36m@@ -119,53 +122,81 @@[m [mdef merge_datasets(static_df: pd.DataFrame, history_df: pd.DataFrame | None):[m
+ [m
+ [m
+ def coerce_numeric_columns(df: pd.DataFrame, columns):[m
+[31m-    """Ensure selected columns exist and are numeric."""[m
+     for col in columns:[m
+         if col not in df.columns:[m
+             df[col] = 0[m
+[31m-        df[col] = pd.to_numeric(df[col], errors="coerce")[m
+[32m+[m[32m        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)[m
+     return df[m
+ [m
+ [m
+ def prepare_labeled_data(df: pd.DataFrame, features):[m
+[31m-    """Keep labeled rows only and return X/y for model training."""[m
+     if "bug_label" not in df.columns:[m
+         raise RuntimeError("The merged dataset does not contain bug_label.")[m
+ [m
+     df = df.copy()[m
+     df["bug_label"] = pd.to_numeric(df["bug_label"], errors="coerce")[m
+[31m-[m
+     labeled_df = df.dropna(subset=["bug_label"]).copy()[m
+     labeled_df["bug_label"] = labeled_df["bug_label"].astype(int)[m
+ [m
+     if labeled_df.empty:[m
+         raise RuntimeError([m
+[31m-            "No labeled rows found. Check that bug_label contains 0 and 1 values."[m
+[32m+[m[32m            "No labeled rows found. Generate repo_history_metrics.csv with bug_label values first."[m
+         )[m
+ [m
+     if labeled_df["bug_label"].nunique() < 2:[m
+[31m-        raise RuntimeError([m
+[31m-            "You need both 0 and 1 in bug_label to train and evaluate a classifier."[m
+[31m-        )[m
+[32m+[m[32m        raise RuntimeError("You need both 0 and 1 in bug_label.")[m
+[32m+[m
+[32m+[m[32m    if "repo_name" not in labeled_df.columns:[m
+[32m+[m[32m        labeled_df["repo_name"] = "unknown"[m
+[32m+[m[32m    labeled_df["repo_name"] = labeled_df["repo_name"].fillna("unknown").astype(str)[m
+ [m
+     X = labeled_df[features].fillna(0)[m
+     y = labeled_df["bug_label"][m
+[31m-    return labeled_df, X, y[m
+[32m+[m[32m    groups = labeled_df["repo_name"][m
+[32m+[m
+[32m+[m[32m    return labeled_df, X, y, groups[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef split_with_groups(X, y, groups):[m
+[32m+[m[32m    gss_outer = GroupShuffleSplit(n_splits=1, test_size=0.30, random_state=42)[m
+[32m+[m[32m    train_idx, temp_idx = next(gss_outer.split(X, y, groups=groups))[m
+[32m+[m
+[32m+[m[32m    X_train = X.iloc[train_idx][m
+[32m+[m[32m    y_train = y.iloc[train_idx][m
+[32m+[m
+[32m+[m[32m    X_temp = X.iloc[temp_idx][m
+[32m+[m[32m    y_temp = y.iloc[temp_idx][m
+[32m+[m[32m    groups_temp = groups.iloc[temp_idx][m
+[32m+[m
+[32m+[m[32m    gss_inner = GroupShuffleSplit(n_splits=1, test_size=0.50, random_state=42)[m
+[32m+[m[32m    val_idx, test_idx = next(gss_inner.split(X_temp, y_temp, groups=groups_temp))[m
+[32m+[m
+[32m+[m[32m    X_val = X_temp.iloc[val_idx][m
+[32m+[m[32m    y_val = y_temp.iloc[val_idx][m
+[32m+[m[32m    X_test = X_temp.iloc[test_idx][m
+[32m+[m[32m    y_test = y_temp.iloc[test_idx][m
+[32m+[m
+[32m+[m[32m    return X_train, X_val, X_test, y_train, y_val, y_test[m
+ [m
+ [m
+ def train_models(X_train, y_train):[m
+[31m-    """Train the Random Forest and Logistic Regression models."""[m
+     rf_model = RandomForestClassifier([m
+[31m-        n_estimators=200,[m
+[32m+[m[32m        n_estimators=300,[m
+         random_state=42,[m
+[31m-        class_weight="balanced",[m
+[32m+[m[32m        class_weight="balanced_subsample",[m
+[32m+[m[32m        min_samples_leaf=2,[m
+[32m+[m[32m        n_jobs=-1,[m
+     )[m
+     rf_model.fit(X_train, y_train)[m
+ [m
+[31m-    lr_model = LogisticRegression([m
+[31m-        max_iter=1000,[m
+[31m-        class_weight="balanced",[m
+[31m-        random_state=42,[m
+[32m+[m[32m    lr_model = make_pipeline([m
+[32m+[m[32m        StandardScaler(),[m
+[32m+[m[32m        LogisticRegression([m
+[32m+[m[32m            max_iter=5000,[m
+[32m+[m[32m            class_weight="balanced",[m
+[32m+[m[32m            random_state=42,[m
+[32m+[m[32m            solver="lbfgs",[m
+[32m+[m[32m        ),[m
+     )[m
+     lr_model.fit(X_train, y_train)[m
+ [m
+[36m@@ -175,34 +206,81 @@[m [mdef train_models(X_train, y_train):[m
+     }[m
+ [m
+ [m
+[31m-def evaluate_model(model, X_test, y_test):[m
+[31m-    """Compute standard classification metrics and ROC data."""[m
+[31m-    y_pred = model.predict(X_test)[m
+[31m-    y_prob = model.predict_proba(X_test)[:, 1][m
+[32m+[m[32mdef safe_roc_metrics(y_true, y_prob):[m
+[32m+[m[32m    unique_classes = pd.Series(y_true).dropna().unique()[m
+[32m+[m[32m    if len(unique_classes) < 2:[m
+[32m+[m[32m        return None, [], [][m
+[32m+[m[32m    roc_auc = roc_auc_score(y_true, y_prob)[m
+[32m+[m[32m    fpr, tpr, _ = roc_curve(y_true, y_prob)[m
+[32m+[m[32m    return float(roc_auc), fpr.tolist(), tpr.tolist()[m
+ [m
+[31m-    precision = precision_score(y_test, y_pred, zero_division=0)[m
+[31m-    recall = recall_score(y_test, y_pred, zero_division=0)[m
+[31m-    f1 = f1_score(y_test, y_pred, zero_division=0)[m
+[31m-    accuracy = accuracy_score(y_test, y_pred)[m
+ [m
+[31m-    fpr, tpr, _ = roc_curve(y_test, y_prob)[m
+[31m-    roc_auc = roc_auc_score(y_test, y_prob)[m
+[31m-    cm = confusion_matrix(y_test, y_pred)[m
+[32m+[m[32mdef evaluate_model(model, X_eval, y_eval, threshold=0.5):[m
+[32m+[m[32m    y_prob = model.predict_proba(X_eval)[:, 1][m
+[32m+[m[32m    y_pred = (y_prob >= threshold).astype(int)[m
+[32m+[m
+[32m+[m[32m    precision = precision_score(y_eval, y_pred, zero_division=0)[m
+[32m+[m[32m    recall = recall_score(y_eval, y_pred, zero_division=0)[m
+[32m+[m[32m    f1 = f1_score(y_eval, y_pred, zero_division=0)[m
+[32m+[m[32m    accuracy = accuracy_score(y_eval, y_pred)[m
+[32m+[m[32m    cm = confusion_matrix(y_eval, y_pred)[m
+[32m+[m[32m    report = classification_report(y_eval, y_pred, zero_division=0, output_dict=True)[m
+[32m+[m
+[32m+[m[32m    roc_auc, fpr, tpr = safe_roc_metrics(y_eval, y_prob)[m
+ [m
+     return {[m
+[32m+[m[32m        "threshold": float(threshold),[m
+         "precision": float(precision),[m
+         "recall": float(recall),[m
+         "f1_score": float(f1),[m
+         "accuracy": float(accuracy),[m
+[31m-        "roc_auc": float(roc_auc),[m
+[32m+[m[32m        "roc_auc": roc_auc,[m
+         "confusion_matrix": cm.tolist(),[m
+[31m-        "fpr": fpr.tolist(),[m
+[31m-        "tpr": tpr.tolist(),[m
+[32m+[m[32m        "classification_report": report,[m
+[32m+[m[32m        "fpr": fpr,[m
+[32m+[m[32m        "tpr": tpr,[m
+     }[m
+ [m
+ [m
+[32m+[m[32mdef find_best_threshold(model, X_val, y_val, min_precision=0.05):[m
+[32m+[m[32m    y_prob = model.predict_proba(X_val)[:, 1][m
+[32m+[m
+[32m+[m[32m    unique_classes = pd.Series(y_val).dropna().unique()[m
+[32m+[m[32m    if len(unique_classes) < 2:[m
+[32m+[m[32m        fallback_metrics = evaluate_model(model, X_val, y_val, threshold=0.5)[m
+[32m+[m[32m        fallback_metrics["selection_rule"] = "fallback_single_class_validation"[m
+[32m+[m[32m        return 0.5, fallback_metrics[m
+[32m+[m
+[32m+[m[32m    _, _, thresholds = precision_recall_curve(y_val, y_prob)[m
+[32m+[m
+[32m+[m[32m    threshold_candidates = sorted(set([0.5] + [float(t) for t in thresholds]))[m
+[32m+[m
+[32m+[m[32m    best_threshold = 0.5[m
+[32m+[m[32m    best_metrics = evaluate_model(model, X_val, y_val, threshold=0.5)[m
+[32m+[m[32m    best_score = float("-inf")[m
+[32m+[m
+[32m+[m[32m    for threshold in threshold_candidates:[m
+[32m+[m[32m        metrics = evaluate_model(model, X_val, y_val, threshold=threshold)[m
+[32m+[m
+[32m+[m[32m        precision = metrics["precision"][m
+[32m+[m[32m        recall = metrics["recall"][m
+[32m+[m[32m        f1 = metrics["f1_score"][m
+[32m+[m
+[32m+[m[32m        if precision >= min_precision:[m
+[32m+[m[32m            score = f1 + (recall * 0.001)[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            score = precision + (recall * 0.0001)[m
+[32m+[m
+[32m+[m[32m        if score > best_score:[m
+[32m+[m[32m            best_score = score[m
+[32m+[m[32m            best_threshold = threshold[m
+[32m+[m[32m            best_metrics = metrics[m
+[32m+[m
+[32m+[m[32m    best_metrics["selection_rule"] = f"best_f1_with_min_precision_{min_precision}"[m
+[32m+[m[32m    return float(best_threshold), best_metrics[m
+[32m+[m
+[32m+[m
+ def get_feature_importance(model, feature_names):[m
+[31m-    """Return feature importance values in descending order."""[m
+     if hasattr(model, "feature_importances_"):[m
+         return dict([m
+             sorted([m
+[36m@@ -212,6 +290,16 @@[m [mdef get_feature_importance(model, feature_names):[m
+             )[m
+         )[m
+ [m
+[32m+[m[32m    if hasattr(model, "named_steps") and "logisticregression" in model.named_steps:[m
+[32m+[m[32m        coef = model.named_steps["logisticregression"].coef_[0][m
+[32m+[m[32m        return dict([m
+[32m+[m[32m            sorted([m
+[32m+[m[32m                zip(feature_names, [abs(v) for v in coef]),[m
+[32m+[m[32m                key=lambda x: x[1],[m
+[32m+[m[32m                reverse=True,[m
+[32m+[m[32m            )[m
+[32m+[m[32m        )[m
+[32m+[m
+     if hasattr(model, "coef_"):[m
+         coef = model.coef_[0][m
+         return dict([m
+[36m@@ -225,8 +313,11 @@[m [mdef get_feature_importance(model, feature_names):[m
+     return {}[m
+ [m
+ [m
+[31m-def score_all_rows(df: pd.DataFrame, model, features, model_name, feature_set_name):[m
+[31m-    """Score every row in the dataset with the selected model."""[m
+[32m+[m[32mdef clean_value(value):[m
+[32m+[m[32m    return None if pd.isna(value) else value[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef score_all_rows(df: pd.DataFrame, model, features, model_name, feature_set_name, threshold):[m
+     scoring_df = df.copy()[m
+ [m
+     for feature in features:[m
+[36m@@ -235,14 +326,18 @@[m [mdef score_all_rows(df: pd.DataFrame, model, features, model_name, feature_set_na[m
+ [m
+     X_all = scoring_df[features].fillna(0)[m
+     bug_prob = model.predict_proba(X_all)[:, 1][m
+[32m+[m[32m    bug_pred = (bug_prob >= threshold).astype(int)[m
+ [m
+     results = [][m
+[31m-    for row, prob in zip(scoring_df.to_dict("records"), bug_prob):[m
+[32m+[m[32m    for row, prob, pred in zip(scoring_df.to_dict("records"), bug_prob, bug_pred):[m
+         results.append({[m
+             "model_name": model_name,[m
+             "feature_set": feature_set_name,[m
+[32m+[m[32m            "threshold": float(threshold),[m
+[32m+[m[32m            "predicted_bug_label": int(pred),[m
+             "repo_name": clean_value(row.get("repo_name")),[m
+             "file": clean_value(row.get("file")),[m
+[32m+[m[32m            "file_id": clean_value(row.get("file_id")),[m
+             "function_id": clean_value(row.get("function_id")),[m
+             "function": clean_value(row.get("function")),[m
+             "language": clean_value(row.get("language")),[m
+[36m@@ -263,70 +358,77 @@[m [mdef score_all_rows(df: pd.DataFrame, model, features, model_name, feature_set_na[m
+     return results[m
+ [m
+ [m
+[31m-def clean_value(value):[m
+[31m-    """Convert pandas NaN values to None for JSON output."""[m
+[31m-    return None if pd.isna(value) else value[m
+[31m-[m
+[31m-[m
+ def save_pickle(path: Path, payload):[m
+[31m-    """Save a Python object as a pickle file."""[m
+     with path.open("wb") as f:[m
+         pickle.dump(payload, f)[m
+ [m
+ [m
+ def save_json(path: Path, payload):[m
+[31m-    """Save a Python object as formatted JSON."""[m
+     with path.open("w", encoding="utf-8") as f:[m
+         json.dump(payload, f, indent=2)[m
+ [m
+ [m
+ def build_model_payload(result):[m
+[31m-    """Build the model payload used by the Flask app."""[m
+     return {[m
+         "model": result["best_model"],[m
+         "features": result["features"],[m
+         "feature_set_name": result["feature_set_name"],[m
+         "best_model_name": result["best_model_name"],[m
+[32m+[m[32m        "threshold": result["best_threshold"],[m
+         "status_label": "Model ready",[m
+     }[m
+ [m
+ [m
+ def train_feature_set(df: pd.DataFrame, feature_set_name: str, features):[m
+[31m-    """Train and evaluate both models for one feature set."""[m
+     df = coerce_numeric_columns(df.copy(), features)[m
+[31m-    labeled_df, X, y = prepare_labeled_data(df, features)[m
+[31m-[m
+[31m-    X_train, X_test, y_train, y_test = train_test_split([m
+[31m-        X,[m
+[31m-        y,[m
+[31m-        test_size=0.3,[m
+[31m-        random_state=42,[m
+[31m-        stratify=y,[m
+[31m-    )[m
+[32m+[m[32m    labeled_df, X, y, groups = prepare_labeled_data(df, features)[m
+ [m
+[32m+[m[32m    X_train, X_val, X_test, y_train, y_val, y_test = split_with_groups(X, y, groups)[m
+     trained_models = train_models(X_train, y_train)[m
+ [m
+     model_results = {}[m
+     best_model_name = None[m
+     best_model = None[m
+[31m-    best_auc = -1[m
+[32m+[m[32m    best_score = float("-inf")[m
+[32m+[m[32m    best_threshold = 0.5[m
+ [m
+[31m-    # Pick the model with the highest ROC AUC for this feature set.[m
+     for model_name, model in trained_models.items():[m
+[31m-        metrics = evaluate_model(model, X_test, y_test)[m
+[32m+[m[32m        tuned_threshold, val_metrics = find_best_threshold([m
+[32m+[m[32m            model, X_val, y_val, min_precision=0.05[m
+[32m+[m[32m        )[m
+[32m+[m[32m        test_metrics = evaluate_model(model, X_test, y_test, threshold=tuned_threshold)[m
+         importances = get_feature_importance(model, features)[m
+ [m
+         model_results[model_name] = {[m
+[31m-            "metrics": metrics,[m
+[32m+[m[32m            "selected_threshold": float(tuned_threshold),[m
+[32m+[m[32m            "validation_metrics": val_metrics,[m
+[32m+[m[32m            "test_metrics": test_metrics,[m
+             "feature_importance": importances,[m
+         }[m
+ [m
+[31m-        if metrics["roc_auc"] > best_auc:[m
+[31m-            best_auc = metrics["roc_auc"][m
+[32m+[m[32m        selection_score = val_metrics.get("f1_score", 0.0)[m
+[32m+[m
+[32m+[m[32m        if selection_score > best_score:[m
+[32m+[m[32m            best_score = selection_score[m
+             best_model_name = model_name[m
+             best_model = model[m
+[31m-[m
+[31m-    all_predictions = score_all_rows(df, best_model, features, best_model_name, feature_set_name)[m
+[32m+[m[32m            best_threshold = tuned_threshold[m
+[32m+[m
+[32m+[m[32m    if best_model_name is None:[m
+[32m+[m[32m        best_model_name, best_model = next(iter(trained_models.items()))[m
+[32m+[m[32m        best_threshold = 0.5[m
+[32m+[m[32m        best_score = model_results[best_model_name]["validation_metrics"].get("f1_score", 0.0)[m
+[32m+[m
+[32m+[m[32m    best_test_metrics = model_results[best_model_name]["test_metrics"][m
+[32m+[m[32m    all_predictions = score_all_rows([m
+[32m+[m[32m        df,[m
+[32m+[m[32m        best_model,[m
+[32m+[m[32m        features,[m
+[32m+[m[32m        best_model_name,[m
+[32m+[m[32m        feature_set_name,[m
+[32m+[m[32m        best_threshold,[m
+[32m+[m[32m    )[m
+[32m+[m[32m    best_auc = model_results[best_model_name]["validation_metrics"].get("roc_auc")[m
+ [m
+     return {[m
+         "feature_set_name": feature_set_name,[m
+[36m@@ -334,7 +436,10 @@[m [mdef train_feature_set(df: pd.DataFrame, feature_set_name: str, features):[m
+         "num_total_rows": int(len(df)),[m
+         "num_labeled_rows": int(len(labeled_df)),[m
+         "best_model_name": best_model_name,[m
+[31m-        "best_model_auc": float(best_auc),[m
+[32m+[m[32m        "best_threshold": float(best_threshold),[m
+[32m+[m[32m        "best_model_auc": None if best_auc is None else float(best_auc),[m
+[32m+[m[32m        "best_model_auc_or_f1_for_selection": float(best_score),[m
+[32m+[m[32m        "best_test_metrics": best_test_metrics,[m
+         "all_model_results": model_results,[m
+         "best_model": best_model,[m
+         "predictions": all_predictions,[m
+[36m@@ -342,7 +447,6 @@[m [mdef train_feature_set(df: pd.DataFrame, feature_set_name: str, features):[m
+ [m
+ [m
+ def main():[m
+[31m-    """Train static-only and combined models, then save outputs."""[m
+     ensure_output_dirs()[m
+ [m
+     static_df = load_csv(STATIC_CSV)[m
+[36m@@ -371,7 +475,10 @@[m [mdef main():[m
+             "num_total_rows": static_result["num_total_rows"],[m
+             "num_labeled_rows": static_result["num_labeled_rows"],[m
+             "best_model_name": static_result["best_model_name"],[m
+[31m-            "best_model_auc": static_result["best_model_auc"],[m
+[32m+[m[32m            "best_threshold": static_result["best_threshold"],[m
+[32m+[m[32m            "best_validation_auc": static_result["best_model_auc"],[m
+[32m+[m[32m            "best_validation_auc_or_f1_for_selection": static_result["best_model_auc_or_f1_for_selection"],[m
+[32m+[m[32m            "best_test_metrics": static_result["best_test_metrics"],[m
+             "all_model_results": static_result["all_model_results"],[m
+         },[m
+         "combined": {[m
+[36m@@ -379,9 +486,13 @@[m [mdef main():[m
+             "num_total_rows": combined_result["num_total_rows"],[m
+             "num_labeled_rows": combined_result["num_labeled_rows"],[m
+             "best_model_name": combined_result["best_model_name"],[m
+[31m-            "best_model_auc": combined_result["best_model_auc"],[m
+[32m+[m[32m            "best_threshold": combined_result["best_threshold"],[m
+[32m+[m[32m            "best_validation_auc": combined_result["best_model_auc"],[m
+[32m+[m[32m            "best_validation_auc_or_f1_for_selection": combined_result["best_model_auc_or_f1_for_selection"],[m
+[32m+[m[32m            "best_test_metrics": combined_result["best_test_metrics"],[m
+             "all_model_results": combined_result["all_model_results"],[m
+         },[m
+[32m+[m[32m        "note": "Labels should come from repo_history_metrics.csv bug-fix history, not from static threshold heuristics.",[m
+     }[m
+ [m
+     save_json(RESULTS_DIR / "training_summary.json", summary)[m
+[36m@@ -399,20 +510,23 @@[m [mdef main():[m
+     print("\nTraining complete.")[m
+     print(f"History CSV found: {history_df is not None}")[m
+     print(f"Static-only best model: {static_result['best_model_name']}")[m
+[31m-    print(f"Static-only best ROC AUC: {static_result['best_model_auc']:.3f}")[m
+[32m+[m[32m    print(f"Static-only best threshold: {static_result['best_threshold']}")[m
+[32m+[m[32m    print(f"Static-only best validation ROC AUC: {static_result['best_model_auc']}")[m
+[32m+[m[32m    print(f"Static-only selection metric: {static_result['best_model_auc_or_f1_for_selection']}")[m
+[32m+[m[32m    print(f"Static-only test precision: {static_result['best_test_metrics']['precision']:.3f}")[m
+[32m+[m[32m    print(f"Static-only test recall: {static_result['best_test_metrics']['recall']:.3f}")[m
+[32m+[m[32m    print(f"Static-only test F1: {static_result['best_test_metrics']['f1_score']:.3f}")[m
+[32m+[m[32m    print(f"Static-only test ROC AUC: {static_result['best_test_metrics']['roc_auc']}")[m
+     print(f"Combined best model: {combined_result['best_model_name']}")[m
+[31m-    print(f"Combined best ROC AUC: {combined_result['best_model_auc']:.3f}")[m
+[32m+[m[32m    print(f"Combined best threshold: {combined_result['best_threshold']}")[m
+[32m+[m[32m    print(f"Combined best validation ROC AUC: {combined_result['best_model_auc']}")[m
+[32m+[m[32m    print(f"Combined selection metric: {combined_result['best_model_auc_or_f1_for_selection']}")[m
+[32m+[m[32m    print(f"Combined test precision: {combined_result['best_test_metrics']['precision']:.3f}")[m
+[32m+[m[32m    print(f"Combined test recall: {combined_result['best_test_metrics']['recall']:.3f}")[m
+[32m+[m[32m    print(f"Combined test F1: {combined_result['best_test_metrics']['f1_score']:.3f}")[m
+[32m+[m[32m    print(f"Combined test ROC AUC: {combined_result['best_test_metrics']['roc_auc']}")[m
+     print(f"Saved results to: {RESULTS_DIR}")[m
+     print(f"Saved top-level static model to: {STATIC_MODEL_TOPLEVEL}")[m
+[31m-    print([m
+[31m-        "UI status label for saved model: "[m
+[31m-        f"{static_payload['status_label']}"[m
+[31m-    )[m
+[31m-    print([m
+[31m-        "Loaded saved model details (terminal only): "[m
+[31m-        f"{static_payload['best_model_name']} with features: "[m
+[31m-        f"{', '.join(static_payload['features'])}"[m
+[31m-    )[m
+ [m
+ [m
+ if __name__ == "__main__":[m

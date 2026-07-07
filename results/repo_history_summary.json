@@ -1,0 +1,67 @@
+{
+  "input_targets": [
+    "data\\repos"
+  ],
+  "repositories_analyzed": 9,
+  "repositories_skipped": 0,
+  "files_with_history": 5317,
+  "repo_summaries": [
+    {
+      "repo_name": "activestate-code",
+      "commits_processed": 54,
+      "commit_file_events": 4827,
+      "files_with_history": 4804
+    },
+    {
+      "repo_name": "cosmicpython-code",
+      "commits_processed": 176,
+      "commit_file_events": 285,
+      "files_with_history": 83
+    },
+    {
+      "repo_name": "pcp-mcp",
+      "commits_processed": 151,
+      "commit_file_events": 212,
+      "files_with_history": 43
+    },
+    {
+      "repo_name": "pilot-metrics-dashboard",
+      "commits_processed": 1,
+      "commit_file_events": 6,
+      "files_with_history": 6
+    },
+    {
+      "repo_name": "Python",
+      "commits_processed": 150,
+      "commit_file_events": 44,
+      "files_with_history": 21
+    },
+    {
+      "repo_name": "python-3-playlist",
+      "commits_processed": 1,
+      "commit_file_events": 0,
+      "files_with_history": 0
+    },
+    {
+      "repo_name": "python-calistus",
+      "commits_processed": 82,
+      "commit_file_events": 128,
+      "files_with_history": 49
+    },
+    {
+      "repo_name": "statistical-learning-method-code",
+      "commits_processed": 132,
+      "commit_file_events": 1191,
+      "files_with_history": 307
+    },
+    {
+      "repo_name": "testpilot-metrics",
+      "commits_processed": 18,
+      "commit_file_events": 20,
+      "files_with_history": 4
+    }
+  ],
+  "skipped_repos": [],
+  "output_csv": "C:\\Users\\nlope\\Desktop\\HCI Application Development - Week 1\\bug_prone_project\\data\\repo_history_metrics.csv",
+  "output_json": "C:\\Users\\nlope\\Desktop\\HCI Application Development - Week 1\\bug_prone_project\\results\\repo_history_summary.json"
+}

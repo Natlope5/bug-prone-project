@@ -46,11 +46,12 @@ def detect_language(path: Path):
 
 def is_test_file(path: Path):
     lowered = str(path).lower()
+    name_lower = path.name.lower()
     return int(
-        "test" in path.name.lower()
+        "test" in name_lower
         or "tests" in lowered
         or "__tests__" in lowered
-        or "spec" in path.name.lower()
+        or "spec" in name_lower
     )
 
 
@@ -61,6 +62,10 @@ def safe_int(value, default=0):
         return int(value)
     except Exception:
         return default
+
+
+def normalize_rel_path(path_str: str):
+    return Path(path_str).as_posix()
 
 
 def collect_code_files(targets):
@@ -103,7 +108,11 @@ def build_repo_name(relative_name: str):
     return ""
 
 
-def extract_lizard_metrics(file_path, target_name):
+def build_file_id(relative_name: str):
+    return normalize_rel_path(relative_name)
+
+
+def extract_lizard_metrics(file_path: Path, target_name: str):
     rows = []
 
     try:
@@ -112,63 +121,61 @@ def extract_lizard_metrics(file_path, target_name):
         print(f"Warning: failed to analyze {file_path}: {e}")
         return rows
 
-    repo_name = build_repo_name(target_name)
+    normalized_target = normalize_rel_path(target_name)
+    repo_name = build_repo_name(normalized_target)
     language = detect_language(file_path)
     extension = file_path.suffix.lower()
     file_name = file_path.name
     test_flag = is_test_file(file_path)
+    file_id = build_file_id(normalized_target)
 
     for func in result.function_list:
         try:
             params = len(func.parameters)
         except Exception:
-            params = 0
+            params = getattr(func, "parameter_count", 0) or 0
 
-        function_name = getattr(func, "name", "") or "anonymous closure"
-        start_line = getattr(func, "start_line", "")
-        end_line = getattr(func, "end_line", "")
-        nloc = getattr(func, "nloc", "")
-        ccn = getattr(func, "cyclomatic_complexity", "")
+        function_name = getattr(func, "name", "") or "anonymous_closure"
+        start_line = getattr(func, "start_line", 0)
+        end_line = getattr(func, "end_line", 0)
+        nloc = getattr(func, "nloc", 0)
+        ccn = getattr(func, "cyclomatic_complexity", 0)
         token = getattr(func, "token_count", 0)
         length = getattr(func, "length", nloc)
 
         start_line_int = safe_int(start_line, 0)
         end_line_int = safe_int(end_line, 0)
-        line_span = end_line_int - start_line_int + 1 if start_line_int and end_line_int else ""
-
-        function_id = f"{target_name}:{function_name}:{start_line}"
-
-        ccn_val = safe_int(ccn, 0)
         nloc_val = safe_int(nloc, 0)
+        ccn_val = safe_int(ccn, 0)
+        token_val = safe_int(token, 0)
         params_val = safe_int(params, 0)
+        length_val = safe_int(length, nloc_val)
 
-        bug_label = 1 if (
-            ccn_val >= 10
-            or nloc_val >= 20
-            or params_val >= 5
-        ) else 0
+        line_span = end_line_int - start_line_int + 1 if start_line_int and end_line_int else 0
+        function_id = f"{file_id}::{function_name}::{start_line_int}"
 
         rows.append({
             "repo_name": repo_name,
-            "file": target_name,
+            "file": normalized_target,
+            "file_id": file_id,
             "file_name": file_name,
-            "relative_path": target_name,
+            "relative_path": normalized_target,
             "extension": extension,
             "language": language,
             "is_test_file": test_flag,
             "function_id": function_id,
             "function": function_name,
-            "start_line": start_line,
-            "end_line": end_line,
+            "start_line": start_line_int,
+            "end_line": end_line_int,
             "line_span": line_span,
-            "nloc": nloc,
-            "ccn": ccn,
-            "token": token,
-            "params": params,
-            "length": length,
+            "nloc": nloc_val,
+            "ccn": ccn_val,
+            "token": token_val,
+            "params": params_val,
+            "length": length_val,
             "radon_grade": "",
-            "radon_cc": ccn,
-            "bug_label": bug_label,
+            "radon_cc": ccn_val,
+            "bug_label": "",
         })
 
     return rows
@@ -178,6 +185,7 @@ def write_csv(rows):
     fieldnames = [
         "repo_name",
         "file",
+        "file_id",
         "file_name",
         "relative_path",
         "extension",
@@ -212,7 +220,7 @@ def write_json(summary):
 def main():
     if len(sys.argv) < 2:
         print("Usage:")
-        print('  py "scripts\\extract_metrics.py" "data\\repos\\angular.js"')
+        print('  py "scripts\\extract_metrics.py" "data\\repos\\pilot-metrics-dashboard"')
         print('  py "scripts\\extract_metrics.py" "data\\repos"')
         print('  py "scripts\\extract_metrics.py" "data\\repos\\repo1" "data\\repos\\repo2"')
         return
@@ -240,6 +248,7 @@ def main():
         except ValueError:
             relative_name = str(file_path)
 
+        relative_name = normalize_rel_path(relative_name)
         rows = extract_lizard_metrics(file_path, relative_name)
 
         if not rows:

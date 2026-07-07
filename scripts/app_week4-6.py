@@ -7,18 +7,13 @@ from pathlib import Path
 import lizard
 import pandas as pd
 
-# BugBuddy Flask prototype: upload code, score functions, and answer follow-up questions.
 app = Flask(__name__)
 
-# Project root for loading saved models and related files.
 ROOT = Path(__file__).resolve().parents[1]
 
 STATIC_MODEL_PATH = ROOT / "results" / "bug_model" / "static_only_model.pkl"
 COMBINED_MODEL_PATH = ROOT / "results" / "bug_model" / "combined_model.pkl"
-TRAINING_SUMMARY_PATH = ROOT / "results" / "bug_model" / "training_summary.json"
 
-# Supported upload types. Python files use the trained model when available;
-# other languages fall back to rule-based scoring.
 ALLOWED_EXTENSIONS = {
     ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp",
     ".cs", ".go", ".php", ".rb", ".swift", ".kt", ".m", ".mm"
@@ -26,12 +21,10 @@ ALLOWED_EXTENSIONS = {
 
 PYTHON_EXTENSIONS = {".py"}
 
-# Keep the most recent upload in memory so the quick buttons can reuse it.
 LAST_UPLOADED_ROWS = []
 LAST_UPLOADED_FILENAME = ""
 LAST_UPLOADED_LANGUAGE = ""
 
-# Inline HTML template so the prototype stays in one file.
 TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -47,7 +40,7 @@ TEMPLATE = """
       color: #2b2b2b;
     }
     .container {
-      max-width: 1150px;
+      max-width: 1200px;
       margin: 0 auto;
       padding: 2rem;
     }
@@ -177,6 +170,17 @@ TEMPLATE = """
     .risk-medium { background-color: #fff6dd !important; }
     .risk-low { background-color: #e8faec !important; }
 
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+    .badge-high { background: #ffd8e1; color: #8b1e3f; }
+    .badge-medium { background: #fff0c2; color: #8a6400; }
+    .badge-low { background: #dff5e4; color: #216b33; }
+
     .small-note {
       font-size: 0.9rem;
       color: #666;
@@ -252,9 +256,9 @@ TEMPLATE = """
         </div>
 
         <ul class="helper-list">
-          <li>Python uploads use the saved trained model when the model file is available.</li>
+          <li>Python uploads use the saved trained model when available.</li>
           <li>Other supported languages use rule-based scoring so the interface still works across languages.</li>
-          <li>Results are ranked by bug probability or fallback risk level and explained in plain language.</li>
+          <li>Results are ranked within the uploaded file so you can review the riskiest functions first.</li>
         </ul>
 
         <p class="small-note">
@@ -276,6 +280,7 @@ TEMPLATE = """
         <table>
           <thead>
             <tr>
+              <th>Rank</th>
               <th>File</th>
               <th>Function</th>
               <th>Language</th>
@@ -284,14 +289,16 @@ TEMPLATE = """
               <th>nloc</th>
               <th>ccn</th>
               <th>params</th>
-              <th>length</th>
-              <th>Bug probability / risk</th>
-              <th>Explanation</th>
+              <th>Length</th>
+              <th>Probability</th>
+              <th>Risk</th>
+              <th>Why it stands out</th>
             </tr>
           </thead>
           <tbody>
             {% for row in uploaded_rows %}
             <tr class="{{ row.risk_class }}">
+              <td>{{ row.rank }}</td>
               <td>{{ row.file }}</td>
               <td>{{ row.function }}</td>
               <td>{{ row.language }}</td>
@@ -301,7 +308,12 @@ TEMPLATE = """
               <td>{{ row.ccn }}</td>
               <td>{{ row.params }}</td>
               <td>{{ row.length }}</td>
-              <td>{{ row.display_score }}</td>
+              <td>{{ row.probability_text }}</td>
+              <td>
+                <span class="badge {% if row.risk_label == 'High' %}badge-high{% elif row.risk_label == 'Medium' %}badge-medium{% else %}badge-low{% endif %}">
+                  {{ row.risk_label }}
+                </span>
+              </td>
               <td>{{ row.explanation }}</td>
             </tr>
             {% endfor %}
@@ -317,19 +329,16 @@ TEMPLATE = """
 
 
 def clean_value(value, fallback=""):
-    """Replace pandas NaN values with a safe fallback."""
     if pd.isna(value):
         return fallback
     return value
 
 
 def allowed_file(filename):
-    """Return True if the uploaded file extension is supported."""
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
 def detect_language(filename):
-    """Map a file extension to a display label for the UI."""
     ext = Path(filename).suffix.lower()
     mapping = {
         ".py": "Python",
@@ -353,12 +362,10 @@ def detect_language(filename):
 
 
 def is_python_file(filename):
-    """Return True for files that should use the saved Python model."""
     return Path(filename).suffix.lower() in PYTHON_EXTENSIONS
 
 
 def normalize_function_name(name):
-    """Clean up blank or anonymous function names for display."""
     if pd.isna(name) or not name:
         return "anonymous closure"
 
@@ -370,40 +377,27 @@ def normalize_function_name(name):
 
 
 def load_saved_model():
-    """Load the saved model payload if it exists."""
-    if not STATIC_MODEL_PATH.exists():
-        return None, [], "Saved model not found. Run train_bug_model.py first."
+    model_path = COMBINED_MODEL_PATH if COMBINED_MODEL_PATH.exists() else STATIC_MODEL_PATH
+
+    if not model_path.exists():
+        return None, [], 0.5, "Upload a file to begin. Python files use the saved model when available."
 
     try:
-        with STATIC_MODEL_PATH.open("rb") as f:
+        with model_path.open("rb") as f:
             payload = pickle.load(f)
 
         model = payload.get("model")
         features = payload.get("features", [])
-        status_label = payload.get("status_label", "Model ready")
-        return model, features, status_label
+        threshold = float(payload.get("threshold", 0.5))
+        status_label = "BugBuddy is ready to review your code and rank functions by risk."
+        return model, features, threshold, status_label
     except Exception as e:
-        return None, [], f"Could not load saved model: {type(e).__name__}: {e}"
+        return None, [], 0.5, f"Could not load saved model: {type(e).__name__}: {e}"
 
 
-def explain_row(row):
-    """Build the table explanation and assign a risk color class."""
-    prob = row.get("bug_probability")
-    risk_label = row.get("risk_label", "")
-    risk_class = "risk-low"
-
-    if prob is not None:
-        if prob >= 0.7:
-            risk_class = "risk-high"
-        elif prob >= 0.4:
-            risk_class = "risk-medium"
-    else:
-        if risk_label == "High":
-            risk_class = "risk-high"
-        elif risk_label == "Medium":
-            risk_class = "risk-medium"
-
+def short_explanation(row):
     parts = []
+
     ccn = row.get("ccn")
     nloc = row.get("nloc")
     params = row.get("params")
@@ -411,31 +405,26 @@ def explain_row(row):
 
     if isinstance(ccn, (int, float)):
         if ccn > 10:
-            parts.append("high cyclomatic complexity")
+            parts.append("High complexity")
         elif ccn >= 6:
-            parts.append("above-average cyclomatic complexity")
+            parts.append("Moderate branching")
 
     if isinstance(nloc, (int, float)):
         if nloc >= 20:
-            parts.append("long function body (many lines of code)")
+            parts.append("Long function body")
         elif nloc >= 10:
-            parts.append("moderate function length")
+            parts.append("Moderate length")
 
-    if isinstance(params, (int, float)):
-        if params >= 4:
-            parts.append("many parameters, which can make the interface harder to use")
-        elif params == 0:
-            parts.append("no parameters, which may limit reuse")
+    if isinstance(params, (int, float)) and params >= 4:
+        parts.append("Many parameters")
 
     if isinstance(length, (int, float)) and length >= 30:
-        parts.append("overall function size is high compared to others in the file")
+        parts.append("Large overall size")
 
-    explanation = ", ".join(parts) if parts else "moderate complexity based on the current metrics"
-    return risk_class, explanation
+    return "; ".join(parts) if parts else "Lower relative risk in this file"
 
 
 def explain_row_simple(row):
-    """Build a more conversational explanation for the chatbot."""
     prob = row.get("bug_probability")
     risk_label = row.get("risk_label", "")
     ccn = row.get("ccn")
@@ -446,46 +435,40 @@ def explain_row_simple(row):
 
     if isinstance(ccn, (int, float)):
         if ccn > 10:
-            parts.append("the function has a lot of decision-making steps, so the logic is pretty complicated")
+            parts.append("the function has a lot of decision-making steps")
         elif ccn >= 6:
-            parts.append("the function has more branching and decision points than a simple function")
+            parts.append("the function has more branching than a simple function")
 
     if isinstance(nloc, (int, float)):
         if nloc >= 20:
-            parts.append("the function is fairly long, so there is more code that could go wrong")
+            parts.append("the function is fairly long")
         elif nloc >= 10:
-            parts.append("the function is a moderate size, so it has a little more going on than a very short function")
+            parts.append("the function is a moderate size")
 
-    if isinstance(params, (int, float)):
-        if params >= 4:
-            parts.append("the function takes several inputs, which can make it harder to follow or reuse")
-        elif params == 0:
-            parts.append("the function does not take any inputs, which can make it less flexible in different situations")
+    if isinstance(params, (int, float)) and params >= 4:
+        parts.append("the function takes several inputs")
 
-    base = "; ".join(parts) if parts else "the function looks average in size and complexity compared to the others"
+    base = "; ".join(parts) if parts else "the function looks simpler than the highest-ranked items in this file"
 
     if prob is not None:
-        if prob >= 0.7:
-            chance = "Overall, this means there is a high chance this function could have bugs."
-        elif prob >= 0.4:
-            chance = "Overall, this means there is a moderate chance this function could have bugs."
-        elif prob >= 0.2:
-            chance = "Overall, this means there is a small chance this function could have bugs."
+        if risk_label == "High":
+            chance = f"It is currently ranked in the high-risk group for this file, with probability {prob:.3f}."
+        elif risk_label == "Medium":
+            chance = f"It is currently ranked in the medium-risk group for this file, with probability {prob:.3f}."
         else:
-            chance = "Overall, this function does not look especially risky right now."
+            chance = f"It is currently ranked in the lower-risk group for this file, with probability {prob:.3f}."
     else:
         if risk_label == "High":
-            chance = "Overall, this function looks high risk based on its complexity metrics."
+            chance = "It looks high risk based on its complexity metrics."
         elif risk_label == "Medium":
-            chance = "Overall, this function looks moderately risky based on its complexity metrics."
+            chance = "It looks moderately risky based on its complexity metrics."
         else:
-            chance = "Overall, this function does not look especially risky right now."
+            chance = "It does not look especially risky right now."
 
     return f"In simpler terms, {base}. {chance}"
 
 
 def rule_based_risk(row):
-    """Fallback scoring for non-Python files."""
     score = 0
 
     ccn = float(row.get("ccn", 0) or 0)
@@ -523,7 +506,6 @@ def rule_based_risk(row):
 
 
 def analyze_file_with_lizard(filepath):
-    """Extract function-level metrics from an uploaded file with lizard."""
     analysis = lizard.analyze_file(str(filepath))
     rows = []
 
@@ -565,8 +547,43 @@ def analyze_file_with_lizard(filepath):
     return rows
 
 
-def score_uploaded_file(filepath, model, features, display_name=None):
-    """Score an uploaded file and return rows sorted from highest to lowest risk."""
+def apply_relative_risk_bands(scored_rows):
+    if not scored_rows:
+        return scored_rows
+
+    ranked = sorted(
+        scored_rows,
+        key=lambda row: row.get("bug_probability", -1) if row.get("bug_probability") is not None else -1,
+        reverse=True,
+    )
+
+    total = len(ranked)
+    high_cutoff = max(1, int(total * 0.20))
+    medium_cutoff = max(high_cutoff + 1, int(total * 0.50))
+
+    for idx, row in enumerate(ranked, start=1):
+        row["rank"] = idx
+
+        if idx <= high_cutoff:
+            row["risk_label"] = "High"
+            row["risk_class"] = "risk-high"
+        elif idx <= medium_cutoff:
+            row["risk_label"] = "Medium"
+            row["risk_class"] = "risk-medium"
+        else:
+            row["risk_label"] = "Low"
+            row["risk_class"] = "risk-low"
+
+        prob = row.get("bug_probability")
+        row["probability_text"] = f"{prob:.3f}" if prob is not None else "—"
+        row["display_score"] = f"#{idx} · {row['probability_text']} · {row['risk_label']}"
+        row["explanation"] = short_explanation(row)
+        row["simple_explanation"] = explain_row_simple(row)
+
+    return ranked
+
+
+def score_uploaded_file(filepath, model, features, threshold, display_name=None):
     rows = analyze_file_with_lizard(filepath)
 
     if not rows:
@@ -584,32 +601,51 @@ def score_uploaded_file(filepath, model, features, display_name=None):
             df[feature] = pd.to_numeric(df[feature], errors="coerce").fillna(0)
 
         probs = model.predict_proba(df[features])[:, 1]
+        preds = (probs >= threshold).astype(int)
 
-        for row, prob in zip(df.to_dict("records"), probs):
+        for row, prob, pred in zip(df.to_dict("records"), probs, preds):
             row["file"] = shown_name
             row["function"] = normalize_function_name(row.get("function"))
             row["bug_probability"] = float(prob)
-            row["risk_label"] = ""
+            row["predicted_bug_label"] = int(pred)
+            row["risk_label"] = "Low"
+            row["risk_class"] = "risk-low"
+            row["probability_text"] = f"{prob:.3f}"
             row["display_score"] = f"{prob:.3f}"
-
-            risk_class, explanation = explain_row(row)
-            row["risk_class"] = risk_class
-            row["explanation"] = explanation
-            row["simple_explanation"] = explain_row_simple(row)
+            row["explanation"] = ""
+            row["simple_explanation"] = ""
             scored_rows.append(row)
+
+        scored_rows = apply_relative_risk_bands(scored_rows)
+
     else:
-        for row in df.to_dict("records"):
+        for idx, row in enumerate(df.to_dict("records"), start=1):
             row["file"] = shown_name
             row["function"] = normalize_function_name(row.get("function"))
             row["bug_probability"] = None
+            row["predicted_bug_label"] = None
             row["risk_label"] = rule_based_risk(row)
+            row["risk_class"] = (
+                "risk-high" if row["risk_label"] == "High"
+                else "risk-medium" if row["risk_label"] == "Medium"
+                else "risk-low"
+            )
+            row["rank"] = idx
+            row["probability_text"] = "—"
             row["display_score"] = row["risk_label"]
-
-            risk_class, explanation = explain_row(row)
-            row["risk_class"] = risk_class
-            row["explanation"] = explanation
+            row["explanation"] = short_explanation(row)
             row["simple_explanation"] = explain_row_simple(row)
             scored_rows.append(row)
+
+        def fallback_sort_value(row):
+            mapping = {"High": 3, "Medium": 2, "Low": 1}
+            return mapping.get(row.get("risk_label", "Low"), 0)
+
+        scored_rows.sort(key=fallback_sort_value, reverse=True)
+
+        for idx, row in enumerate(scored_rows, start=1):
+            row["rank"] = idx
+            row["display_score"] = f"#{idx} · {row['risk_label']}"
 
     def sort_value(row):
         if row.get("bug_probability") is not None:
@@ -622,47 +658,36 @@ def score_uploaded_file(filepath, model, features, display_name=None):
 
 
 def chatbot_response(message, rows, features, language_name):
-    """Handle quick-button prompts and free-form chatbot questions."""
     msg = message.lower().strip()
 
     if not rows:
         return "Please upload a supported code file first so I can analyze its functions."
 
-    # Check this first so "highest-risk" does not get routed to the top-functions case.
     if "why" in msg or "explain" in msg or "flagged" in msg:
         top = rows[0]
-        simple_text = top.get("simple_explanation", "")
         return (
-            f"The highest-risk function in your uploaded {language_name} file right now is "
-            f"{top['function']} in {top['file']} with score {top['display_score']}. "
-            f"I flagged it because it shows {top['explanation']}.\n\n"
-            f"{simple_text}"
+            f"The highest-ranked function in your uploaded {language_name} file is "
+            f"{top['function']} in {top['file']}.\n\n"
+            f"Why it stands out: {top['explanation']}.\n\n"
+            f"{top['simple_explanation']}"
         )
 
     if "high-risk" in msg or "high risk" in msg:
-        high = [
-            row for row in rows
-            if (row.get("bug_probability") is not None and row["bug_probability"] >= 0.7)
-            or row.get("risk_label") == "High"
-        ]
+        high = [row for row in rows if row.get("risk_label") == "High"]
         if not high:
             return f"I didn’t find any high-risk functions in your uploaded {language_name} file."
         response = f"I found {len(high)} high-risk functions in your uploaded {language_name} file:\n"
         for row in high[:10]:
-            response += f"- {row['function']} in {row['file']} ({row['display_score']})\n"
+            response += f"- #{row['rank']} {row['function']} ({row['probability_text']})\n"
         return response
 
     if "medium" in msg:
-        med = [
-            row for row in rows
-            if (row.get("bug_probability") is not None and 0.4 <= row["bug_probability"] < 0.7)
-            or row.get("risk_label") == "Medium"
-        ]
+        med = [row for row in rows if row.get("risk_label") == "Medium"]
         if not med:
             return f"I didn’t find any medium-risk functions in your uploaded {language_name} file right now."
         response = f"I found {len(med)} medium-risk functions in your uploaded {language_name} file:\n"
         for row in med[:10]:
-            response += f"- {row['function']} in {row['file']} ({row['display_score']})\n"
+            response += f"- #{row['rank']} {row['function']} ({row['probability_text']})\n"
         return response
 
     if "metrics" in msg or "features" in msg:
@@ -670,14 +695,14 @@ def chatbot_response(message, rows, features, language_name):
         return (
             f"I analyze your uploaded {language_name} file using function-level metrics such as "
             f"nloc, ccn, params, and length. When the saved model is available, I use these model features: "
-            f"{feature_text}."
+            f"{feature_text}. I rank functions within the uploaded file so the riskiest ones are easier to review first."
         )
 
     if "top" in msg or "most bug" in msg or "most bug-prone" in msg or "most complex" in msg:
         top = rows[:5]
-        response = f"Here are the top 5 bug-prone or most complex functions in your uploaded {language_name} file:\n"
-        for i, row in enumerate(top, 1):
-            response += f"{i}. {row['function']} in {row['file']} ({row['display_score']})\n"
+        response = f"Here are the top 5 highest-ranked functions in your uploaded {language_name} file:\n"
+        for row in top:
+            response += f"{row['rank']}. {row['function']} ({row['probability_text']}, {row['risk_label']})\n"
         return response
 
     return "Ask about the top functions, high-risk functions, medium-risk functions, model metrics, or why something was flagged."
@@ -685,17 +710,17 @@ def chatbot_response(message, rows, features, language_name):
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    """Main route for uploads, chatbot input, and page rendering."""
     global LAST_UPLOADED_ROWS, LAST_UPLOADED_FILENAME, LAST_UPLOADED_LANGUAGE
 
-    model, train_features, model_status = load_saved_model()
+    model, train_features, threshold, model_status = load_saved_model()
     status_message = model_status
     context_note = ""
 
     bot_greeting = (
         "Hi! I’m BugBuddy 🤖\n"
         "Upload a supported code file and I’ll analyze its functions for bug risk.\n"
-        "Python files use the saved trained model when available, while other languages use rule-based risk analysis."
+        "Python files use the saved trained model when available, while other languages use rule-based risk analysis.\n"
+        "I rank functions within your uploaded file so you can review the riskiest code first."
     )
 
     user_message = ""
@@ -729,6 +754,7 @@ def index():
                         temp_path,
                         model,
                         train_features,
+                        threshold,
                         display_name=uploaded_file.filename,
                     )
 
@@ -747,10 +773,10 @@ def index():
                         top = uploaded_rows[0]
                         bot_reply = (
                             f"I analyzed {uploaded_file.filename} as a {detected_language} file and found "
-                            f"{len(uploaded_rows)} functions. The highest-risk function is {top['function']} "
-                            f"with score {top['display_score']}. It appears risky because it shows "
-                            f"{top['explanation']}.\n\n"
-                            f"{top['simple_explanation']}"
+                            f"{len(uploaded_rows)} functions.\n\n"
+                            f"Top result: #{top['rank']} {top['function']} "
+                            f"({top['probability_text']}, {top['risk_label']}).\n"
+                            f"Why it stands out: {top['explanation']}."
                         )
                     else:
                         LAST_UPLOADED_ROWS = []
@@ -787,7 +813,7 @@ def index():
         elif q == "metrics":
             user_message = "What metrics does the model use?"
         elif q == "why":
-            user_message = "Why was the highest-risk function flagged?"
+            user_message = "Why was something flagged?"
 
         if user_message:
             language_name = LAST_UPLOADED_LANGUAGE if LAST_UPLOADED_LANGUAGE else "code"
