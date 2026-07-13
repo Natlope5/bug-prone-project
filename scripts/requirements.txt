@@ -1,4 +1,9 @@
-Flask==3.0.3
-gunicorn==22.0.0
-lizard==1.17.10
-pandas==2.2.2
+Flask
+gunicorn
+lizard
+pandas
+numpy
+scipy
+scikit-learn
+joblib
+threadpoolctl
