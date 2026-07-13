@@ -9,18 +9,25 @@ import pandas as pd
 
 app = Flask(__name__)
 
+# Root project folder so the app can find saved model files.
 ROOT = Path(__file__).resolve().parents[1]
 
+# Saved model locations. The combined model is preferred when it exists.
 STATIC_MODEL_PATH = ROOT / "results" / "bug_model" / "static_only_model.pkl"
 COMBINED_MODEL_PATH = ROOT / "results" / "bug_model" / "combined_model.pkl"
 
+# File types the app is allowed to analyze.
 ALLOWED_EXTENSIONS = {
     ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp",
     ".cs", ".go", ".php", ".rb", ".swift", ".kt", ".m", ".mm"
 }
 
+# Python files can use the saved trained model when one is available.
 PYTHON_EXTENSIONS = {".py"}
 
+# These globals keep the current uploaded file in memory only during the
+# current running app session. They are intentionally cleared on a fresh
+# page load so the app opens as a clean, ready-to-use screen.
 LAST_UPLOADED_ROWS = []
 LAST_UPLOADED_FILENAME = ""
 LAST_UPLOADED_LANGUAGE = ""
@@ -32,6 +39,7 @@ TEMPLATE = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BugBuddy</title>
+  <link rel="icon" href="data:,">
   <style>
     body {
       font-family: "Segoe UI", system-ui, sans-serif;
@@ -328,16 +336,20 @@ TEMPLATE = """
 """
 
 
+# Safely clean a value coming from pandas/lizard so missing values do not leak
+# into the UI.
 def clean_value(value, fallback=""):
     if pd.isna(value):
         return fallback
     return value
 
 
+# Check whether the uploaded file extension is supported by the app.
 def allowed_file(filename):
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
+# Map file extensions to a cleaner display label for the interface.
 def detect_language(filename):
     ext = Path(filename).suffix.lower()
     mapping = {
@@ -361,10 +373,12 @@ def detect_language(filename):
     return mapping.get(ext, "Unknown")
 
 
+# Only Python files use the saved model. The rest fall back to rule-based scoring.
 def is_python_file(filename):
     return Path(filename).suffix.lower() in PYTHON_EXTENSIONS
 
 
+# Clean up function names that may be missing or anonymous.
 def normalize_function_name(name):
     if pd.isna(name) or not name:
         return "anonymous closure"
@@ -376,6 +390,7 @@ def normalize_function_name(name):
     return text
 
 
+# Load the best available saved model payload from disk.
 def load_saved_model():
     model_path = COMBINED_MODEL_PATH if COMBINED_MODEL_PATH.exists() else STATIC_MODEL_PATH
 
@@ -395,6 +410,8 @@ def load_saved_model():
         return None, [], 0.5, f"Could not load saved model: {type(e).__name__}: {e}"
 
 
+# Short explanation used in the table so the user can quickly understand why a
+# function stands out.
 def short_explanation(row):
     parts = []
 
@@ -424,6 +441,7 @@ def short_explanation(row):
     return "; ".join(parts) if parts else "Lower relative risk in this file"
 
 
+# Longer natural-language explanation for the chatbot response.
 def explain_row_simple(row):
     prob = row.get("bug_probability")
     risk_label = row.get("risk_label", "")
@@ -468,6 +486,8 @@ def explain_row_simple(row):
     return f"In simpler terms, {base}. {chance}"
 
 
+# Rule-based scoring for non-Python files or for cases where a saved model is
+# not available.
 def rule_based_risk(row):
     score = 0
 
@@ -505,6 +525,7 @@ def rule_based_risk(row):
     return "Low"
 
 
+# Use lizard to extract function-level metrics from the uploaded code file.
 def analyze_file_with_lizard(filepath):
     analysis = lizard.analyze_file(str(filepath))
     rows = []
@@ -547,6 +568,8 @@ def analyze_file_with_lizard(filepath):
     return rows
 
 
+# Convert raw scores into relative risk bands within the uploaded file so the
+# UI highlights the riskiest functions first.
 def apply_relative_risk_bands(scored_rows):
     if not scored_rows:
         return scored_rows
@@ -583,6 +606,8 @@ def apply_relative_risk_bands(scored_rows):
     return ranked
 
 
+# Score one uploaded file either with the trained model or with the fallback
+# rule-based scoring logic.
 def score_uploaded_file(filepath, model, features, threshold, display_name=None):
     rows = analyze_file_with_lizard(filepath)
 
@@ -657,6 +682,7 @@ def score_uploaded_file(filepath, model, features, threshold, display_name=None)
     return scored_rows, ""
 
 
+# Lightweight chatbot helper for the quick questions and typed prompts.
 def chatbot_response(message, rows, features, language_name):
     msg = message.lower().strip()
 
@@ -725,20 +751,36 @@ def index():
 
     user_message = ""
     bot_reply = ""
-    uploaded_rows = LAST_UPLOADED_ROWS[:] if LAST_UPLOADED_ROWS else []
 
-    if LAST_UPLOADED_ROWS and LAST_UPLOADED_FILENAME:
-        context_note = (
-            f"Current uploaded file: {LAST_UPLOADED_FILENAME} "
-            f"({LAST_UPLOADED_LANGUAGE}). Quick buttons use this uploaded file only."
-        )
+    # Default page state is intentionally empty so the app feels fresh each time
+    # someone opens or revisits it.
+    uploaded_rows = []
+
+    # On a plain GET to the homepage with no quick-button query, clear the old
+    # in-memory upload state so the user starts with a clean screen.
+    if request.method == "GET" and not request.args.get("q"):
+        LAST_UPLOADED_ROWS = []
+        LAST_UPLOADED_FILENAME = ""
+        LAST_UPLOADED_LANGUAGE = ""
 
     if request.method == "POST":
+        # If the user typed a chat message, use the currently stored uploaded rows
+        # from this active app session only.
         if "message" in request.form and request.form.get("message", "").strip():
             user_message = request.form.get("message", "")
+            uploaded_rows = LAST_UPLOADED_ROWS[:] if LAST_UPLOADED_ROWS else []
             language_name = LAST_UPLOADED_LANGUAGE if LAST_UPLOADED_LANGUAGE else "code"
+
+            if LAST_UPLOADED_ROWS and LAST_UPLOADED_FILENAME:
+                context_note = (
+                    f"Current uploaded file: {LAST_UPLOADED_FILENAME} "
+                    f"({LAST_UPLOADED_LANGUAGE}). Quick buttons use this uploaded file only."
+                )
+
             bot_reply = chatbot_response(user_message, uploaded_rows, train_features, language_name)
 
+        # If the user uploaded a code file, analyze it and store the results for
+        # the current active app session.
         elif "code_file" in request.files:
             uploaded_file = request.files["code_file"]
 
@@ -803,21 +845,32 @@ def index():
                 )
 
     else:
+        # Quick buttons only work when there is already an active uploaded file in
+        # the current app session. A fresh visit stays empty by design.
         q = request.args.get("q", "")
-        if q == "top":
-            user_message = "Which functions are most bug-prone?"
-        elif q == "high":
-            user_message = "Show high-risk functions"
-        elif q == "medium":
-            user_message = "Show medium-risk functions"
-        elif q == "metrics":
-            user_message = "What metrics does the model use?"
-        elif q == "why":
-            user_message = "Why was something flagged?"
+        if q:
+            uploaded_rows = LAST_UPLOADED_ROWS[:] if LAST_UPLOADED_ROWS else []
 
-        if user_message:
-            language_name = LAST_UPLOADED_LANGUAGE if LAST_UPLOADED_LANGUAGE else "code"
-            bot_reply = chatbot_response(user_message, uploaded_rows, train_features, language_name)
+            if LAST_UPLOADED_ROWS and LAST_UPLOADED_FILENAME:
+                context_note = (
+                    f"Current uploaded file: {LAST_UPLOADED_FILENAME} "
+                    f"({LAST_UPLOADED_LANGUAGE}). Quick buttons use this uploaded file only."
+                )
+
+            if q == "top":
+                user_message = "Which functions are most bug-prone?"
+            elif q == "high":
+                user_message = "Show high-risk functions"
+            elif q == "medium":
+                user_message = "Show medium-risk functions"
+            elif q == "metrics":
+                user_message = "What metrics does the model use?"
+            elif q == "why":
+                user_message = "Why was something flagged?"
+
+            if user_message:
+                language_name = LAST_UPLOADED_LANGUAGE if LAST_UPLOADED_LANGUAGE else "code"
+                bot_reply = chatbot_response(user_message, uploaded_rows, train_features, language_name)
 
     return render_template_string(
         TEMPLATE,
