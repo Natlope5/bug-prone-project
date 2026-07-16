@@ -1,9 +1,0 @@
-Flask
-gunicorn
-lizard
-pandas
-numpy
-scipy
-scikit-learn
-joblib
-threadpoolctl
