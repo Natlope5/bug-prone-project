@@ -1,0 +1,15 @@
+Flask
+gunicorn
+lizard
+pandas
+numpy
+scipy
+scikit-learn
+joblib
+threadpoolctl
+python-dotenv
+sqlalchemy<2
+psycopg2-binary
+redis
+requests
+tenacity
