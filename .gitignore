@@ -11,4 +11,4 @@ __pycache__/
 docs/~$*.docx
 
 # Standalone model pickle (you already track models in results/bug_model/)
-results/bug_model.pkl
+results/bug_model.pkl.env
